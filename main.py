@@ -77,8 +77,36 @@ import numpy as np
 #_______________________________________________________________________________________________________________________________________________________________________________________________
 
 addres = '/home/micheal/Documents/Python_Library/RL_Optimization_Portfolio/data/processed/AP_MS_daily.CSV'
+raw = pd.read_csv(addres, parse_dates=['Date'], index_col='Date', engine='pyarrow', dtype_backend='pyarrow')
 
-df = pd.read_csv(addres, parse_dates=['Date'], index_col='Date')
+# print (df.head())
+# print (df.columns)
+# print (df.dtypes)
+# print (df.info())
+
+def shrinking_ints (df):
+    mapping = {}
+    for col in df.dtypes [df.dtypes=='int64[pyarrow]'].index:
+        max_ = df[col].max()
+        min_ = df[col].min()
+        if min_ < 0:
+            continue
+        elif max_ < 255:
+            mapping[col] = 'uint8[pyarrow]'
+        elif max_ <65_535:
+            mapping[col] = 'uint16[pyarrow]'
+        elif max_ < 4294967295:
+            mapping[col] = 'uint32[pyarrow]'
+    return df.astype(mapping)
+
+def clean(df):
+    return (df
+    .assign(**df.select_dtypes('string').replace('', 'Missing').astype('category'))
+    .pipe(shrinking_ints)
+    )
+    
+df = clean(raw)
 
 print (df.head())
-print (df.columns)
+print (df.dtypes)
+#________________________________________________________________________________________
