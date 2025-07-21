@@ -14,8 +14,8 @@ class MetaPortfolioEnv(gym.Env):
         self.df = df_with_perf_data.copy()
         self.sub_agent_models = sub_agent_models # Dictionary of {'A2C': model_a2c, 'PPO': model_ppo}
         self.num_assets = num_assets
-        self.features_list = features_list # Features used by sub-agents for their observation
-        self.window_size = window_size # Lookback for sub-agent observations
+        self.features_list = features_list # Features used by sub-agents for their observation (e.g. LogReturn_Z)
+        self.window_size = window_size # Lookback for sub-agent observations (market features for meta-agent)
         self.initial_balance = initial_balance
         self.transaction_cost_rate = transaction_cost_rate
         self.perf_window_size = perf_window_size # Lookback for sub-agent performance in meta-obs
@@ -28,39 +28,21 @@ class MetaPortfolioEnv(gym.Env):
 
         # --- Meta-Agent's Observation Space ---
         # This will be a flattened vector of:
-        # 1. Overall Market Features (e.g., average LogReturn_Z across assets for current window_size)
-        # 2. Overall Portfolio State (balance, cash, drawdown, etc.)
-        # 3. Recent Performance of each sub-agent (e.g., average daily return over perf_window_size)
+        # 1. Overall Market Features: (e.g., mean and std of LogReturn_Z across all assets for current window_size) - 2 features
+        # 2. Overall Portfolio State: (normalized balance, cash percentage, current portfolio weights) - 1 + 1 + (num_assets + 1) features
+        # 3. Recent Performance of each sub-agent: (mean daily return, std dev daily return over perf_window_size for A2C and PPO) - 2 * num_sub_agents features
 
-        # Calculate base feature size per day (num_assets * num_features_per_asset) from sub-env
-        # And current portfolio state (num_assets + 1 for weights) from sub-env
-        # This is what a sub-agent receives from Mult_Asset_portEnv
-        sub_env_obs_row_size = self.num_assets * len(self.features_list) + (self.num_assets + 1)
-        
-        # Meta-observation features:
-        # 1. Rolling average of LogReturn_Z for all assets (over current window_size, e.g., 5 * 2 = 10 features)
-        # 2. Overall Portfolio state (balance, cash, current_weights) = 1 + 1 + (num_assets + 1) = 3 + num_assets features
-        # 3. Rolling average daily return for EACH sub-agent (over perf_window_size, e.g., 20 * num_sub_agents = 40 features)
-        # Let's simplify and use the last day's average return for the period, and a rolling Sharpe for each sub-agent.
+        num_market_features = 2 # mean_log_return_z, std_log_return_z
+        num_portfolio_state_features = 1 + 1 + (self.num_assets + 1) # normalized_balance, cash_percentage, portfolio_weights
+        num_sub_agent_perf_features = self.num_sub_agents * 2 # mean and std for each sub-agent
 
-        # Simplified meta-observation features:
-        # - Mean LogReturn_Z across all assets for the current window (1 feature)
-        # - Std Dev of LogReturn_Z across all assets for the current window (1 feature)
-        # - Current portfolio balance (normalized) (1 feature)
-        # - Current cash percentage (1 feature)
-        # - Current overall portfolio weights (num_assets + 1 features)
-        # - Average performance (e.g., mean daily return) of each sub-agent over perf_window_size (num_sub_agents features)
-        # - Standard deviation of performance of each sub-agent over perf_window_size (num_sub_agents features)
-
-        num_meta_features = 2 + 1 + 1 + (self.num_assets + 1) + (self.num_sub_agents * 2) # (mean, std) for market, (balance, cash, weights), (mean, std) for each sub-agent
+        num_meta_features = num_market_features + num_portfolio_state_features + num_sub_agent_perf_features
         
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(num_meta_features,), dtype=np.float32 # Flattened meta-observation
         )
 
         # Ensure enough data for both sub-agent window and meta-agent performance window
-        # The meta-agent needs current_step + perf_window_size data points to calculate historical performance
-        # (initial window_size for sub-agent obs) + (perf_window_size for meta-agent's performance history)
         if len(self.df) < self.window_size + self.perf_window_size + 1:
             raise ValueError(f"DataFrame too short for meta-agent environment. Requires at least "
                              f"{self.window_size + self.perf_window_size + 1} rows, but has {len(self.df)}.")
@@ -84,7 +66,6 @@ class MetaPortfolioEnv(gym.Env):
         # Ensure we have enough data for the observation window and performance window
         if self.current_step < self.window_size + self.perf_window_size:
             # This should ideally not happen if reset() sets current_step correctly
-            # But as a fallback, return zeros or raise an error if this state is invalid
             return np.zeros(self.observation_space.shape, dtype=np.float32)
 
         # --- Extract Market Features for Meta-Observation ---
@@ -92,9 +73,10 @@ class MetaPortfolioEnv(gym.Env):
         market_obs_start_idx = self.current_step - self.window_size
         market_obs_end_idx = self.current_step
         
-        log_return_z_cols = [f"{ticker}_LogReturn_Z" for ticker in sorted(self.df.columns.str.split('_').str[0].unique())]
+        # Get columns that end with '_LogReturn_Z' for market observation
+        market_log_return_z_cols = [col for col in self.df.columns if col.endswith('_LogReturn_Z')]
         
-        market_window_data = self.df.loc[self.df.index[market_obs_start_idx:market_obs_end_idx], log_return_z_cols].values
+        market_window_data = self.df.loc[self.df.index[market_obs_start_idx:market_obs_end_idx], market_log_return_z_cols].values
         
         mean_log_return_z = np.mean(market_window_data)
         std_log_return_z = np.std(market_window_data)
@@ -107,6 +89,7 @@ class MetaPortfolioEnv(gym.Env):
         perf_data_start_idx = self.current_step - self.perf_window_size
         perf_data_end_idx = self.current_step
 
+        # FIX: Use 'DailyReturn' columns as generated
         a2c_perf = self.df.loc[self.df.index[perf_data_start_idx:perf_data_end_idx], 'A2C_DailyReturn'].values
         ppo_perf = self.df.loc[self.df.index[perf_data_start_idx:perf_data_end_idx], 'PPO_DailyReturn'].values
         
@@ -123,15 +106,20 @@ class MetaPortfolioEnv(gym.Env):
 
         # --- Construct the final meta-observation vector ---
         meta_observation = np.concatenate([
-            np.array([mean_log_return_z, std_log_return_z]), # Market features
-            np.array([normalized_balance, cash_percentage]), # Portfolio state
-            self.portfolio_weights,                          # Current detailed portfolio weights
-            np.array([a2c_mean_perf, a2c_std_perf, ppo_mean_perf, ppo_std_perf]) # Sub-agent performance
+            np.array([mean_log_return_z, std_log_return_z]), # Market features (2)
+            np.array([normalized_balance, cash_percentage]), # Portfolio state (2)
+            self.portfolio_weights,                          # Current detailed portfolio weights (num_assets + 1)
+            np.array([a2c_mean_perf, a2c_std_perf, ppo_mean_perf, ppo_std_perf]) # Sub-agent performance (num_sub_agents * 2)
         ])
 
         # Ensure the observation matches the defined space shape
         if meta_observation.shape != self.observation_space.shape:
-            raise RuntimeError(f"Meta-observation shape mismatch: Expected {self.observation_space.shape}, got {meta_observation.shape}")
+            raise RuntimeError(f"Meta-observation shape mismatch: Expected {self.observation_space.shape}, got {meta_observation.shape}. "
+                               f"Calculated components: Market {np.array([mean_log_return_z, std_log_return_z]).shape}, "
+                               f"Portfolio State {np.array([normalized_balance, cash_percentage]).shape}, "
+                               f"Weights {self.portfolio_weights.shape}, "
+                               f"Sub-agent Perf {np.array([a2c_mean_perf, a2c_std_perf, ppo_mean_perf, ppo_std_perf]).shape}")
+
 
         return meta_observation.astype(np.float32)
 
@@ -142,28 +130,29 @@ class MetaPortfolioEnv(gym.Env):
         # 1. Meta-Agent chooses a sub-agent based on its action
         chosen_agent_name = None
         chosen_sub_model = None
+        temp_env = None # Initialize outside if/else for broader scope
+        temp_obs = None # Initialize outside if/else for broader scope
+
         if action == 0:
             chosen_agent_name = 'A2C'
             chosen_sub_model = self.sub_agent_models['A2C']
-            # Re-create environment for sub-agent prediction as its observation depends on it
-            temp_env = Mult_Asset_portEnv(df=self.df.copy(), num_assets=self.num_assets, features_list=self.features_list, window_size=self.window_size, initial_balance=self.initial_balance, transaction_cost_rate=self.transaction_cost_rate)
-            temp_env.current_step = self.current_step # Align temp_env's current step
-            temp_obs = temp_env._get_observation() # Get observation for sub-agent
-
         elif action == 1:
             chosen_agent_name = 'PPO'
             chosen_sub_model = self.sub_agent_models['PPO']
-            temp_env = Mult_Asset_portEnv(df=self.df.copy(), num_assets=self.num_assets, features_list=self.features_list, window_size=self.window_size, initial_balance=self.initial_balance, transaction_cost_rate=self.transaction_cost_rate)
-            temp_env.current_step = self.current_step # Align temp_env's current step
-            temp_obs = temp_env._get_observation() # Get observation for sub-agent
         else:
             raise ValueError(f"Invalid meta-agent action: {action}. Must be 0 (A2C) or 1 (PPO).")
+
+        # Create a temporary environment instance aligned with the current meta-step
+        # This is where the sub-agent gets its view of the market.
+        temp_env = Mult_Asset_portEnv(df=self.df.copy(), num_assets=self.num_assets, features_list=self.features_list, window_size=self.window_size, initial_balance=self.initial_balance, transaction_cost_rate=self.transaction_cost_rate)
+        # Crucially, align the temp_env's current step with the meta-env's current step
+        temp_env.current_step = self.current_step 
+        temp_obs = temp_env._get_observation() # Get observation for sub-agent from its perspective
 
         # 2. Get the action (portfolio weights) from the chosen sub-agent
         sub_agent_action, _states = chosen_sub_model.predict(temp_obs, deterministic=True)
         
         # 3. Apply the sub-agent's action to the main portfolio simulation
-        # The following logic is adapted from Mult_Asset_portEnv's step method
         
         # Normalize action to ensure weights sum to 1.0 (sub-agent's action is continuous)
         sub_agent_action = sub_agent_action / np.sum(sub_agent_action) 
@@ -231,10 +220,13 @@ class MetaPortfolioEnv(gym.Env):
             elif self.balance < (self.initial_balance * 0.1): info['reason'] = 'low_balance'
             elif self.current_step >= len(self.df): info['reason'] = 'end_of_data'
 
+        # Store chosen agent name in info for rendering/debugging
+        info['chosen_agent'] = chosen_agent_name 
+        self.chosen_agent_name = chosen_agent_name # Store for render method
+        
         return self._get_observation(), reward, done, info
         
     def render(self, mode='human'):
         if mode == 'human':
-            # This render includes sub-agent name for clarity
             print(f"Step {self.current_step}, Total Port Value: {self.balance:.2f}, Cash: {self.cash:.2f}, "
                   f"Weights: {[f'{w:.2f}' for w in self.portfolio_weights]}, Chosen Agent: {self.chosen_agent_name if hasattr(self, 'chosen_agent_name') else 'N/A'}")
