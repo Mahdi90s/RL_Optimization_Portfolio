@@ -65,7 +65,6 @@ class MetaPortfolioEnv(gym.Env):
     def _get_observation(self):
         # Ensure we have enough data for the observation window and performance window
         if self.current_step < self.window_size + self.perf_window_size:
-            # This should ideally not happen if reset() sets current_step correctly
             return np.zeros(self.observation_space.shape, dtype=np.float32)
 
         # --- Extract Market Features for Meta-Observation ---
@@ -73,9 +72,19 @@ class MetaPortfolioEnv(gym.Env):
         market_obs_start_idx = self.current_step - self.window_size
         market_obs_end_idx = self.current_step
         
-        # Get columns that end with '_LogReturn_Z' for market observation
-        market_log_return_z_cols = [col for col in self.df.columns if col.endswith('_LogReturn_Z')]
+        # FIX: Correctly select columns that represent stock LogReturn_Z values
+        # These are columns like 'AAPL_LogReturn_Z', 'MSFT_LogReturn_Z', etc.
+        # Ensure these columns are always picked by matching the suffix '_LogReturn_Z'
+        # AND by explicitly excluding columns that start with agent names
+        market_log_return_z_cols = [
+            col for col in self.df.columns 
+            if col.endswith('_LogReturn_Z') and not col.startswith(('A2C_', 'PPO_')) # Exclude agent-specific cols
+        ]
         
+        # Ensure we have selected at least some market features
+        if not market_log_return_z_cols:
+            raise RuntimeError("No 'TICKER_LogReturn_Z' columns found for market observation in df_meta_data after filtering.")
+
         market_window_data = self.df.loc[self.df.index[market_obs_start_idx:market_obs_end_idx], market_log_return_z_cols].values
         
         mean_log_return_z = np.mean(market_window_data)
@@ -89,12 +98,11 @@ class MetaPortfolioEnv(gym.Env):
         perf_data_start_idx = self.current_step - self.perf_window_size
         perf_data_end_idx = self.current_step
 
-        # FIX: Use 'DailyReturn' columns as generated
+        # Use 'DailyReturn' columns as generated
         a2c_perf = self.df.loc[self.df.index[perf_data_start_idx:perf_data_end_idx], 'A2C_DailyReturn'].values
         ppo_perf = self.df.loc[self.df.index[perf_data_start_idx:perf_data_end_idx], 'PPO_DailyReturn'].values
         
-        # Handle potential NaNs in performance data (e.g., from initial window_size steps)
-        # Replace NaNs with 0 or a small number, or average over non-NaNs
+        # Handle potential NaNs in performance data
         a2c_perf = np.nan_to_num(a2c_perf, nan=0.0)
         ppo_perf = np.nan_to_num(ppo_perf, nan=0.0)
 
@@ -130,9 +138,7 @@ class MetaPortfolioEnv(gym.Env):
         # 1. Meta-Agent chooses a sub-agent based on its action
         chosen_agent_name = None
         chosen_sub_model = None
-        temp_env = None # Initialize outside if/else for broader scope
-        temp_obs = None # Initialize outside if/else for broader scope
-
+        
         if action == 0:
             chosen_agent_name = 'A2C'
             chosen_sub_model = self.sub_agent_models['A2C']
@@ -143,20 +149,17 @@ class MetaPortfolioEnv(gym.Env):
             raise ValueError(f"Invalid meta-agent action: {action}. Must be 0 (A2C) or 1 (PPO).")
 
         # Create a temporary environment instance aligned with the current meta-step
-        # This is where the sub-agent gets its view of the market.
         temp_env = Mult_Asset_portEnv(df=self.df.copy(), num_assets=self.num_assets, features_list=self.features_list, window_size=self.window_size, initial_balance=self.initial_balance, transaction_cost_rate=self.transaction_cost_rate)
-        # Crucially, align the temp_env's current step with the meta-env's current step
         temp_env.current_step = self.current_step 
-        temp_obs = temp_env._get_observation() # Get observation for sub-agent from its perspective
+        temp_obs = temp_env._get_observation() 
 
         # 2. Get the action (portfolio weights) from the chosen sub-agent
         sub_agent_action, _states = chosen_sub_model.predict(temp_obs, deterministic=True)
         
         # 3. Apply the sub-agent's action to the main portfolio simulation
         
-        # Normalize action to ensure weights sum to 1.0 (sub-agent's action is continuous)
         sub_agent_action = sub_agent_action / np.sum(sub_agent_action) 
-        self.portfolio_weights = sub_agent_action # Meta-env updates its portfolio_weights based on sub-agent's decision
+        self.portfolio_weights = sub_agent_action 
 
         current_data_row = self.df.iloc[self.current_step]
         asset_tickers_in_order = sorted(self.df.columns.str.split('_').str[0].unique())
