@@ -58,6 +58,7 @@ class Mult_asset_env(gym.Env):
         self.portfolio_weights = np.array([0.0] * self.num_assets + [1.0],dtype=np.float32)
         self.assets_shares = np.array([0.0] * self.num_assets, dtype=np.float32)
         self.history = []
+        self.return_history = []
         self.peak_portfolio_value = self.initial_balance
         return self.get_obs()
         
@@ -76,7 +77,11 @@ class Mult_asset_env(gym.Env):
         if obs_values.shape[0] < expected_rows:
             pad_rows = expected_rows - obs_values.shape[0]
             obs_values = np.vstack([obs_values, np.zeros((pad_rows, len(self.features_list)), dtype=np.float32)])
-                
+
+        mean = np.mean(obs_values, axis=0, keepdims=True)
+        std = np.std(obs_values, axis=0, keepdims=True) + 1e-8
+        obs_values = (obs_values - mean) / std
+
         feature_window_data = obs_values.reshape(
             self.window_size, self.num_assets * self.num_features_per_asset
         )
@@ -141,7 +146,19 @@ class Mult_asset_env(gym.Env):
         max_return_clip = 0.1
         min_return_clip = -0.1
         portfolio_daily_return = np.clip(portfolio_daily_return, min_return_clip, max_return_clip)
-        reward = portfolio_daily_return
+        self.return_history.append(portfolio_daily_return)
+        
+        if len(self.return_history) < 2:
+            reward = portfolio_daily_return
+        else:
+            window = min(len(self.return_history), 30)
+            mean_return = np.mean(self.return_history[-window:])
+            std_return = np.std(self.return_history[-window:]) + 1e-9
+            reward = mean_return / std_return
+
+        cash_penalty = -0.001 * (self.cash / self.balance)
+        reward += cash_penalty
+
         
         self.history.append(self.balance)
         self.peak_portfolio_value = max(self.peak_portfolio_value, self.balance)
