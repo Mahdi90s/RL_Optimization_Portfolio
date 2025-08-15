@@ -76,6 +76,7 @@ class Mult_asset_env(gym.Env):
         self.cash = self.initial_balance
         self.portfolio_weights = np.array([0.0] * self.num_assets + [1.0],dtype=np.float32)
         self.assets_shares = np.array([0.0] * self.num_assets, dtype=np.float32)
+        self.avg_cost_per_asset = np.zeros(self.num_assets, dtype=np.float32)
         self.history = []
         self.return_history = []
         self.peak_portfolio_value = self.initial_balance
@@ -151,45 +152,17 @@ class Mult_asset_env(gym.Env):
         transaction_costs = np.sum (np.abs(shares_to_buy_sell * current_close_prices)) * self.transaction_cost_rate
         new_cash = self.cash - trade_cash - transaction_costs
         
-        
-        # if new_cash <= -1e-6:
-        #     obs = self.get_obs()
-        #     return obs, -1.0, Fales, {'reason': 'infeasible_trade'}
-        
-        
-        # self.cash = new_cash
-        # self.assets_shares += shares_to_buy_sell 
-        
-        # new_assets_market_value = np.sum(self.assets_shares * current_close_prices)
-        # self.balance = self.cash + new_assets_market_value
-        
-        # epsilon_balance = 1e-9
-        # portfolio_daily_return = (self.balance - total_portfolio_value_before_trades) / (total_portfolio_value_before_trades + epsilon_balance)
-        
-        # max_return_clip = 0.1
-        # min_return_clip = -0.1
-        # portfolio_daily_return = np.clip(portfolio_daily_return, min_return_clip, max_return_clip)
-        # self.return_history.append(portfolio_daily_return)
-        
-        # if len(self.return_history) < 2:
-        #     reward = portfolio_daily_return + 0.01 * (self.balance - self.initial_balance)
-        # else:
-        #     window = min(len(self.return_history), 30)
-        #     mean_return = np.mean(self.return_history[-window:])
-        #     std_return = np.std(self.return_history[-window:]) + 1e-9
-            
-        #     if std_return < 1e-6:
-        #         reward = mean_return
-        #     else:
-        #         reward = mean_return / std_return
-            
-        #     reward += portfolio_daily_return * 0.1
-
-        # cash_penalty = -0.02 * (self.cash / self.balance)
-        # reward += cash_penalty
         if new_cash < -1e-6:
             obs = self.get_obs()
             return obs, -0.1, False, {'reason': 'infeasible_trade'}
+        
+        for i in range(self.num_assets):
+            if shares_to_buy_sell[i] > 0:
+                total_cost_existing = self.avg_cost_per_asset[i] * self.assets_shares[i]
+                total_cost_new = shares_to_buy_sell[i] * current_close_prices[i]
+                total_shares = self.assets_shares[i] + shares_to_buy_sell[i]
+                if total_shares > 0:
+                    self.avg_cost_per_asset[i] = (total_cost_existing + total_cost_new) / total_shares
         
         self.last_transaction_costs = transaction_costs
         self.cash = max(0.0, new_cash)
@@ -207,11 +180,18 @@ class Mult_asset_env(gym.Env):
         
         w_cash = float(self.portfolio_weights[-1])
         invested_weight = 1.0 - w_cash
+        
+        profit_bouns = 0.0
+        if np.any(self.assets_shares > 0):
+            asset_gains = (current_close_prices - (pv_before / (self.assets_shares.sum() + 1e-6)))
+            profit_bouns = np.mean(np.clip(asset_gains, 0, None)) * 0.001
+            
         reward = (
             daily_ret
             - self.risk_aversion * vol
             - self.cash_penalty_coef * w_cash
             + self.invest_bouns_coef * invested_weight
+            + profit_bouns
         )
 
         
@@ -220,9 +200,18 @@ class Mult_asset_env(gym.Env):
         
         
         done = (self.current_step + 1) >= len(self.dates) or self.balance < (self.initial_balance * 0.1)
-        if not done:
-            self.current_step += 1
-            
+        
+        if done and (self.current_step + 1) >= len(self.dates):
+            final_prices = current_close_prices
+            for i, shares in enumerate(self.assets_shares):
+                if shares > 0 and final_prices[i] < self.avg_cost_per_asset[i]:
+                        self.cash += shares * final_prices[i]
+                        self.assets_shares[i] = 0.0
+            self.balance = self.cash + np.sum(self.assets_shares * final_prices)
+        else:      
+            if not done:
+                self.current_step += 1
+                
         info = {}
         if done:
             if self.balance <= 0: info['reason'] = 'bankrupt'
@@ -230,7 +219,6 @@ class Mult_asset_env(gym.Env):
             elif self.current_step >= len(self.dates): info['reason'] = 'end_of_data'
         
         obs = self.get_obs()
-        # obs = np.nan_to_num(obs, nan=0.0, posinf=1e6, neginf=-1e6)    
            
         return obs, float(reward), bool(done), info
 
