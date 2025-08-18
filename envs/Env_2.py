@@ -14,9 +14,9 @@ class Mult_asset_env(gym.Env):
         window_size=5, 
         initial_balance=1000, 
         transaction_cost_rate=0.001,
-        risk_aversion=0.10,
-        cash_penalty=0.02,
-        invest_bouns=0.001,
+        risk_aversion=0.005,
+        cash_penalty=0.4,
+        invest_bouns=0.15,
         vol_window=20,
         clip_return=0.10
     ):
@@ -182,16 +182,22 @@ class Mult_asset_env(gym.Env):
         invested_weight = 1.0 - w_cash
         
         profit_bouns = 0.0
-        if np.any(self.assets_shares > 0):
-            asset_gains = (current_close_prices - (pv_before / (self.assets_shares.sum() + 1e-6)))
-            profit_bouns = np.mean(np.clip(asset_gains, 0, None)) * 0.001
+        # if np.any(self.assets_shares > 0):
+        #     asset_gains = (current_close_prices - (pv_before / (self.assets_shares.sum() + 1e-6)))
+        #     profit_bouns = np.mean(np.clip(asset_gains, 0, None)) * 0.05
+        
+        if np.any(self.assets_shares > 0) and len(self.return_history) > 0:
+            recent_returns = self.return_history[-5:] if len(self.return_history) >= 5 else self.return_history
+            positive_returns = np.mean(np.maximum(recent_returns, 0))
+            profit_bouns = positive_returns * 0.1
+        
             
         reward = (
-            daily_ret
-            - self.risk_aversion * vol
-            - self.cash_penalty_coef * w_cash
+            5 * daily_ret
+            - 0.1 * self.risk_aversion * vol
+            - self.cash_penalty_coef  * w_cash
             + self.invest_bouns_coef * invested_weight
-            + profit_bouns
+            + 5 * profit_bouns
         )
 
         
@@ -203,10 +209,6 @@ class Mult_asset_env(gym.Env):
         
         if done and (self.current_step + 1) >= len(self.dates):
             final_prices = current_close_prices
-            for i, shares in enumerate(self.assets_shares):
-                if shares > 0 and final_prices[i] < self.avg_cost_per_asset[i]:
-                        self.cash += shares * final_prices[i]
-                        self.assets_shares[i] = 0.0
             self.balance = self.cash + np.sum(self.assets_shares * final_prices)
         else:      
             if not done:
